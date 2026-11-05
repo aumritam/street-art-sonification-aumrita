@@ -7,7 +7,7 @@
   <meta name="description" content="Explore street art through responsive visual contours, sound, and live interaction data.">
   <title>Street Art Sonification</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/static/styles.css?v=20261101-gaze-friction1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261105-webgazer1">
 </head>
 <body class="setup-active">
   <section id="setupScreen" class="setup-screen" aria-label="Start a new sonification">
@@ -108,6 +108,7 @@
       <div id="canvasShell" class="canvas-shell" tabindex="0" aria-label="Interactive street art canvas">
         <canvas id="artCanvas"></canvas>
         <div id="gazeCursor" class="gaze-cursor" hidden aria-hidden="true"><i></i></div>
+        <div id="headStatus" class="head-status" hidden role="status" aria-live="polite"></div>
         <div id="scanReadout" class="scan-readout" hidden>
           <span>TIME</span>
           <strong id="canvasScanTime">00:00</strong>
@@ -147,16 +148,24 @@
           </button>
         </div>
         <div class="eye-state">
-          <video id="eyeVideo" autoplay playsinline muted hidden aria-label="Eye-tracking camera preview"></video>
           <div><span>INPUT SOURCE</span><strong id="eyeStatus">Mouse active · camera off</strong></div>
         </div>
-        <label class="gaze-stability" for="gazeStability" title="Friction: lower is more responsive; higher is steadier">
-          <span>GAZE STABILITY</span>
-          <div>
-            <input id="gazeStability" type="range" min="0" max="100" value="50" step="1" disabled aria-label="Eye-tracking stability">
-            <output id="gazeStabilityValue" for="gazeStability">Balanced</output>
-          </div>
-        </label>
+        <div class="gaze-sliders">
+          <label class="gaze-stability" for="gazeStability" title="Left = quick but shaky. Right = steady but slow.">
+            <span>FRICTION</span>
+            <div>
+              <input id="gazeStability" type="range" min="0" max="100" value="50" step="1" disabled aria-label="Eye-tracking friction">
+              <output id="gazeStabilityValue" for="gazeStability">50</output>
+            </div>
+          </label>
+          <label class="gaze-stability" for="gazeRadius" title="How big an area around your gaze is averaged for the colour and region.">
+            <span>RADIUS</span>
+            <div>
+              <input id="gazeRadius" type="range" min="20" max="100" value="45" step="1" disabled aria-label="Gaze ring radius">
+              <output id="gazeRadiusValue" for="gazeRadius">45 px</output>
+            </div>
+          </label>
+        </div>
         <button id="eyeCalibrate" class="calibrate-button" type="button" disabled>Calibrate</button>
         <button id="pointerFullscreen" class="fullscreen-button" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/></svg>
@@ -405,16 +414,15 @@
 
   <div id="calibrationOverlay" class="calibration-overlay" hidden>
     <div class="calibration-copy">
-      <span>WEBEYETRACK · LOCAL CALIBRATION</span>
-      <strong>Keep your head still, look at the target, then click when it is ready.</strong>
-      <small id="calibrationProgress">Point 1 of 12</small>
+      <span>WEBGAZER · LOCAL CALIBRATION</span>
+      <strong>Look at each red dot and click it five times. Keep your head still.</strong>
+      <small id="calibrationProgress">12 dots left</small>
     </div>
     <button id="calibrationCancel" class="calibration-cancel" type="button">Cancel</button>
-    <button id="calibrationTarget" class="calibration-target" type="button" aria-label="Eye-tracking calibration target"><i></i><span>HOLD</span></button>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/vendor/webeyetrack.js?v=0.0.2-local3"></script>
-  <script src="/static/app.js?v=multipart-regions1"></script>
+  <script src="/static/vendor/webgazer/webgazer.js?v=3.5.3"></script>
+  <script src="/static/app.js?v=20261105-webgazer1"></script>
 </body>
 </html>

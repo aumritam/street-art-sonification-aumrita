@@ -49,12 +49,13 @@ const mouseSource = $("#mouseSource");
 const eyeToggle = $("#eyeToggle");
 const eyeCalibrate = $("#eyeCalibrate");
 const eyeStatus = $("#eyeStatus");
-const eyeVideo = $("#eyeVideo");
 const gazeStability = $("#gazeStability");
 const gazeStabilityValue = $("#gazeStabilityValue");
+const gazeRadius = $("#gazeRadius");
+const gazeRadiusValue = $("#gazeRadiusValue");
 const gazeCursor = $("#gazeCursor");
+const headStatus = $("#headStatus");
 const calibrationOverlay = $("#calibrationOverlay");
-const calibrationTarget = $("#calibrationTarget");
 const calibrationProgress = $("#calibrationProgress");
 const calibrationCancel = $("#calibrationCancel");
 const logicOverlay = $("#logicOverlay");
@@ -70,7 +71,6 @@ const outputModeButtons = [...document.querySelectorAll("[data-output-mode]")];
 const DEFAULT_SCAN_DURATION = 3 * 60;
 const MAX_MUSIC_DURATION = 10 * 60;
 const SCAN_PROFILE_BINS = 360;
-const EYE_CALIBRATION_SAMPLE_MIN = 8;
 const EYE_REGION_DWELL_MS = 135;
 const EYE_REGION_RELEASE_MS = 190;
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -439,23 +439,16 @@ const state = {
     starting: false,
     ready: false,
     calibrated: false,
-    sessionId: 0,
-    webcamClient: null,
-    tracker: null,
-    smoothX: null,
-    smoothY: null,
-    lastSmoothAt: 0,
-    lastResultAt: 0,
-    calibrationIndex: 0,
-    calibrationReady: false,
-    calibrationSamples: [],
-    calibrationPairs: [],
-    calibrationTargets: [],
-    calibrationModel: null,
-    calibrationCollectingAt: 0,
-    calibrationTimer: 0,
-    startupTimer: 0,
-    rawHistory: [],
+    calibrating: false,
+    webgazerStarted: false,
+    running: false,
+    gazeBuffer: [],
+    smooth: null,
+    lastGazeTime: 0,
+    calSum: { x: 0, y: 0, gap: 0, n: 0 },
+    headRef: null,
+    headLog: [],
+    headState: "",
     candidateRegionId: null,
     candidateSince: 0,
     outsideSince: 0,
@@ -1279,7 +1272,10 @@ function sampleVisualAt(nx, ny) {
   if (!pixels || !Number.isFinite(nx) || !Number.isFinite(ny)) return null;
   const centerX = Math.max(0, Math.min(pixels.width - 1, Math.round(nx * (pixels.width - 1))));
   const centerY = Math.max(0, Math.min(pixels.height - 1, Math.round(ny * (pixels.height - 1))));
-  const radius = Math.max(4, Math.min(44, Math.round(Math.min(pixels.width, pixels.height) * .026)));
+  const canvasWidth = canvas.getBoundingClientRect().width;
+  const radius = state.pointer.source === "gaze" && state.eye.active && canvasWidth
+    ? Math.max(2, Math.round(gazeRadiusPx() * pixels.width / canvasWidth))
+    : Math.max(4, Math.min(44, Math.round(Math.min(pixels.width, pixels.height) * .026)));
   const step = Math.max(1, Math.floor(radius / 8));
   const reds = [];
   const greens = [];
@@ -1633,7 +1629,7 @@ function regionAt(nx, ny) {
 function regionAtGaze(nx, ny) {
   const rect = canvas.getBoundingClientRect();
   if (!rect.width || !rect.height) return regionAt(nx, ny);
-  const radius = 32;
+  const radius = gazeRadiusPx();
   const offsets = [
     [0, 0], [.45, 0], [-.45, 0], [0, .45], [0, -.45],
     [.7, .7], [-.7, .7], [.7, -.7], [-.7, -.7],
@@ -1924,7 +1920,7 @@ function outputPayload() {
     eyeTracking: !scanning ? {
       enabled: state.eye.active,
       calibrated: state.eye.calibrated,
-      model: state.eye.active ? "WebEyeTrack" : null,
+      model: state.eye.active ? "WebGazer" : null,
     } : null,
     music: {
       source: "realtime-algorithm",
@@ -2913,218 +2909,239 @@ canvas.addEventListener("pointerdown", async (event) => {
   }
 });
 
+// --------------------------------------------------
+// EYE TRACKING (WebGazer, ported from color_eye_tracking)
+// --------------------------------------------------
+// WebGazer guesses where you look from small pictures of your eyes. It learns
+// from clicks: each calibration click says "I am looking here right now".
+// After calibration you can also look at a spot and click it to correct it.
+
+const WEBGAZER_FACE_MESH_PATH = "/static/vendor/webgazer/mediapipe/face_mesh";
+const WEBGAZER_PREVIEW_W = 180;
+const WEBGAZER_PREVIEW_H = 135;
+// WebGazer only remembers its last 50 clicks. Calibration is 12 dots x 5
+// clicks = 60, so the first dots were being forgotten. Keep room for 120.
+const WEBGAZER_MEMORY = 120;
+const CALIBRATION_CLICKS_PER_DOT = 5;
+
+// Head-movement thresholds, measured in "eye gaps" (distance between your
+// eyes in the camera image), so they work at any distance from the camera.
+const HEAD_OK = .15;   // sideways / up / down shift
+const HEAD_BAD = .30;
+const ZOOM_OK = .07;   // closer / farther
+const ZOOM_BAD = .15;
+
+function medianOf(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function gazeRadiusPx() {
+  return Number(gazeRadius.value) || 45;
+}
+
 function updateEyeButtons() {
   const active = state.eye.active || state.eye.starting;
   eyeToggle.classList.toggle("active", active);
   eyeToggle.setAttribute("aria-pressed", String(active));
   mouseSource.classList.toggle("active", !active);
   mouseSource.setAttribute("aria-pressed", String(!active));
-  eyeCalibrate.disabled = !state.eye.ready || !state.eye.active;
+  eyeCalibrate.disabled = !state.eye.running || !state.eye.active || state.eye.calibrating;
+  eyeCalibrate.textContent = state.eye.calibrated ? "Recalibrate" : "Calibrate";
   gazeStability.disabled = !active;
-  eyeVideo.hidden = !active;
-}
-
-function gazeStabilityLabel(value) {
-  if (value < 34) return "Responsive";
-  if (value > 66) return "Stable";
-  return "Balanced";
+  gazeRadius.disabled = !active;
+  if (!active || state.eye.calibrating) setHeadStatus("");
 }
 
 function updateGazeStabilityLabel() {
-  const label = gazeStabilityLabel(Number(gazeStability.value));
-  gazeStabilityValue.textContent = label;
-  gazeStability.setAttribute("aria-valuetext", label);
+  gazeStabilityValue.textContent = gazeStability.value;
+  gazeStability.setAttribute("aria-valuetext", `${gazeStability.value} of 100`);
 }
 
-function gazeFrictionBase() {
-  const friction = Math.max(0, Math.min(1, Number(gazeStability.value) / 100));
+function updateGazeRadiusLabel() {
+  gazeRadiusValue.textContent = `${gazeRadius.value} px`;
+  gazeCursor.style.width = `${2 * gazeRadiusPx()}px`;
+  gazeCursor.style.height = `${2 * gazeRadiusPx()}px`;
+}
+
+// Friction (0-100) controls three things:
+//   win  - how many recent guesses we take the middle value of
+//   tau  - how long (seconds) the ring takes to catch up
+//   dead - a dead zone in pixels where the ring only creeps
+function frictionSettings() {
+  const f = Number(gazeStability.value) / 100;
   return {
-    friction,
-    windowSize: 3 + 2 * Math.round(friction * 6),
-    tau: .05 * Math.pow(24, friction),
+    win: 3 + 2 * Math.round(f * 6), // 3, 5, 7 ... 15
+    tau: .05 * Math.pow(24, f),     // 0.05 s ... 1.2 s
+    dead: 80 * f,                   // 0 ... 80 px
   };
 }
 
-function adaptiveGazeDeadZone(friction, targetX, targetY, canvasRect) {
-  if (!canvasRect.width || !canvasRect.height) return 0;
-  const minDimension = Math.min(canvasRect.width, canvasRect.height);
-  let deadZone = Math.min(80 * friction, minDimension * .08);
-  const nx = (targetX - canvasRect.left) / canvasRect.width;
-  const ny = (targetY - canvasRect.top) / canvasRect.height;
-  if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1) {
-    const targetRegion = regionAtGaze(nx, ny);
-    if (targetRegion) {
-      const areaRatio = Math.max(.0001, Math.min(1, Number(targetRegion.area_ratio || .5)));
-      const equivalentRadius = Math.sqrt(areaRatio * canvasRect.width * canvasRect.height / Math.PI);
-      // A small semantic region gets a much smaller dead zone, so stability
-      // never makes it impossible to reach a detail inside a larger region.
-      deadZone = Math.min(deadZone, Math.max(3, equivalentRadius * .22));
+function smoothGaze(rawX, rawY, now) {
+  const { win, tau, dead } = frictionSettings();
+  const buffer = state.eye.gazeBuffer;
+  buffer.push({ x: rawX, y: rawY });
+  while (buffer.length > win) buffer.shift();
+  const targetX = medianOf(buffer.map((point) => point.x));
+  const targetY = medianOf(buffer.map((point) => point.y));
+  if (!state.eye.smooth || buffer.length === 1) {
+    state.eye.smooth = { x: targetX, y: targetY };
+    state.eye.lastGazeTime = now;
+    return state.eye.smooth;
+  }
+  const dt = Math.min(Math.max((now - state.eye.lastGazeTime) / 1000, 0), .25);
+  state.eye.lastGazeTime = now;
+  const dx = targetX - state.eye.smooth.x;
+  const dy = targetY - state.eye.smooth.y;
+  const dist = Math.hypot(dx, dy);
+  // The farther away the target, the faster the ring catches up. Inside the
+  // dead zone it only creeps (6x slower), so small wobble is ignored.
+  const tauNow = dist <= dead ? tau * 6 : tau / (1 + (dist - dead) / 150);
+  const alpha = 1 - Math.exp(-dt / tauNow);
+  state.eye.smooth.x += dx * alpha;
+  state.eye.smooth.y += dy * alpha;
+  return state.eye.smooth;
+}
+
+function resetGazeSmoothing() {
+  state.eye.gazeBuffer = [];
+  state.eye.smooth = null;
+}
+
+// ----- WebGazer setup helpers -----
+
+function tuneWebGazer() {
+  const gaze = window.webgazer;
+  if (!gaze) return;
+  // Learn from clicks only, not from where the mouse moves.
+  if (gaze.params) gaze.params.moveTickSize = 1e9;
+  if (typeof gaze.getRegression !== "function" || !gaze.util?.DataWindow) {
+    console.warn("Could not enlarge WebGazer's click memory.");
+    return;
+  }
+  const keys = ["screenXClicksArray", "screenYClicksArray", "eyeFeaturesClicks", "dataClicks"];
+  for (const regression of gaze.getRegression()) {
+    for (const key of keys) {
+      if (regression[key] && regression[key].windowSize < WEBGAZER_MEMORY) {
+        regression[key] = new gaze.util.DataWindow(WEBGAZER_MEMORY, regression[key].data);
+      }
     }
   }
-  return deadZone;
 }
 
-function smoothGazePoint(targetX, targetY, now, canvasRect, tau, friction) {
-  if (state.eye.smoothX === null || state.eye.smoothY === null) {
-    state.eye.smoothX = targetX;
-    state.eye.smoothY = targetY;
-    state.eye.lastSmoothAt = now;
-    return;
+// WebGazer's showVideoPreview(false) permanently overwrites its own "show"
+// flags, so set each part directly instead.
+function setPreviewVisible(visible) {
+  const gaze = window.webgazer;
+  if (!gaze) return;
+  gaze.showVideo?.(visible);
+  gaze.showFaceOverlay?.(visible);
+  gaze.showFaceFeedbackBox?.(visible);
+}
+
+// Safety net: while eye tracking runs, keep the camera preview on screen.
+window.setInterval(() => {
+  if (!state.eye.webgazerStarted || !state.eye.running) return;
+  const gaze = window.webgazer;
+  const box = document.getElementById("webgazerVideoContainer");
+  if (!gaze?.params || !box) return;
+  const style = window.getComputedStyle(box);
+  const hidden = style.display === "none" || style.visibility === "hidden" || style.opacity === "0";
+  if (hidden || !gaze.params.showVideo || !gaze.params.showFaceOverlay || !gaze.params.showFaceFeedbackBox) {
+    setPreviewVisible(true);
   }
-  const elapsed = Math.min(.25, Math.max(0, (now - state.eye.lastSmoothAt) / 1000));
-  state.eye.lastSmoothAt = now;
-  const dx = targetX - state.eye.smoothX;
-  const dy = targetY - state.eye.smoothY;
-  const distance = Math.hypot(dx, dy);
-  const deadZone = adaptiveGazeDeadZone(friction, targetX, targetY, canvasRect);
-  // Small involuntary movements creep slowly; deliberate larger movements
-  // progressively catch up faster, avoiding a permanently sluggish cursor.
-  const effectiveTau = distance <= deadZone
-    ? tau * 6
-    : tau / (1 + (distance - deadZone) / 150);
-  const alpha = 1 - Math.exp(-elapsed / Math.max(.001, effectiveTau));
-  state.eye.smoothX += dx * alpha;
-  state.eye.smoothY += dy * alpha;
+}, 500);
+
+// ----- Head-movement watcher -----
+// WebGazer has no idea where your head is. If you lean after calibrating, the
+// ring drifts. Remember where your eyes were during calibration and warn.
+
+function eyeMetrics(features) {
+  if (!features?.left || !features?.right) return null;
+  const lx = features.left.imagex + features.left.width / 2;
+  const ly = features.left.imagey + features.left.height / 2;
+  const rx = features.right.imagex + features.right.width / 2;
+  const ry = features.right.imagey + features.right.height / 2;
+  const metrics = { x: (lx + rx) / 2, y: (ly + ry) / 2, gap: Math.hypot(lx - rx, ly - ry) };
+  return Object.values(metrics).every(Number.isFinite) && metrics.gap > 0 ? metrics : null;
 }
 
-function createEyeTrackerWithoutGlobalClickLearning(webcamClient) {
-  const originalAddEventListener = window.addEventListener;
-  window.addEventListener = function addEventListenerWithoutEyeClickPollution(type, listener, options) {
-    if (type === "click") return;
-    return originalAddEventListener.call(window, type, listener, options);
+function setHeadStatus(headState) {
+  if (headState === state.eye.headState) return;
+  state.eye.headState = headState;
+  const messages = {
+    ok: "Head position: good",
+    warn: "Head drifting. Move back to where you were when you calibrated.",
+    bad: "Head moved a lot. Move back, or press Recalibrate.",
+    lost: "Face not found. Look at the camera.",
   };
-  try {
-    return new window.WebEyeTrackProxy(webcamClient);
-  } finally {
-    window.addEventListener = originalAddEventListener;
-  }
+  headStatus.hidden = !headState;
+  headStatus.className = `head-status ${headState}`;
+  headStatus.textContent = messages[headState] || "";
 }
 
-function gazeToArtwork(result) {
-  if (!state.eye.active || state.mode !== "pointer" || result.gazeState === "closed") return;
-  const rawX = result.normPog[0] + .5;
-  const rawY = result.normPog[1] + .5;
-  if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return;
-  recordCalibrationSample(rawX, rawY);
-  if (!calibrationOverlay.hidden) {
-    gazeCursor.hidden = true;
+function trackHead(data) {
+  const metrics = data ? eyeMetrics(data.eyeFeatures) : null;
+  if (state.eye.calibrating) {
+    if (metrics) {
+      const sum = state.eye.calSum;
+      sum.x += metrics.x;
+      sum.y += metrics.y;
+      sum.gap += metrics.gap;
+      sum.n++;
+    }
     return;
   }
-  const friction = gazeFrictionBase();
-  state.eye.rawHistory.push([rawX, rawY]);
-  while (state.eye.rawHistory.length > friction.windowSize) state.eye.rawHistory.shift();
-  const filteredRawX = median(state.eye.rawHistory.map((point) => point[0]));
-  const filteredRawY = median(state.eye.rawHistory.map((point) => point[1]));
-  const calibrated = applyEyeCalibration(filteredRawX, filteredRawY);
-  const targetX = calibrated.x * window.innerWidth;
-  const targetY = calibrated.y * window.innerHeight;
-  const now = performance.now();
-  const canvasRect = canvas.getBoundingClientRect();
-  smoothGazePoint(targetX, targetY, now, canvasRect, friction.tau, friction.friction);
-  state.eye.lastResultAt = now;
+  if (!state.eye.headRef || !state.eye.running || !state.eye.active) {
+    setHeadStatus("");
+    return;
+  }
+  if (!metrics) {
+    setHeadStatus("lost");
+    return;
+  }
+  const log = state.eye.headLog;
+  log.push(metrics);
+  if (log.length > 8) log.shift();
+  const ref = state.eye.headRef;
+  const x = medianOf(log.map((point) => point.x));
+  const y = medianOf(log.map((point) => point.y));
+  const gap = medianOf(log.map((point) => point.gap));
+  const shift = Math.hypot(x - ref.x, y - ref.y) / ref.gap;
+  const zoom = Math.abs(gap / ref.gap - 1);
+  if (shift > HEAD_BAD || zoom > ZOOM_BAD) setHeadStatus("bad");
+  else if (shift > HEAD_OK || zoom > ZOOM_OK) setHeadStatus("warn");
+  else setHeadStatus("ok");
+}
+
+// ----- Gaze predictions -> artwork -----
+
+function onGaze(data) {
+  trackHead(data);
+  if (!data || !Number.isFinite(data.x) || !Number.isFinite(data.y)) return;
+  if (!state.eye.calibrated || !state.eye.active || state.eye.calibrating || state.mode !== "pointer") return;
+  const point = smoothGaze(data.x, data.y, performance.now());
   const shellRect = canvasShell.getBoundingClientRect();
-  const shellX = state.eye.smoothX - shellRect.left;
-  const shellY = state.eye.smoothY - shellRect.top;
-  const insideShell = shellX >= 0 && shellX <= shellRect.width && shellY >= 0 && shellY <= shellRect.height;
+  const canvasRect = canvas.getBoundingClientRect();
+  const shellX = point.x - shellRect.left;
+  const shellY = point.y - shellRect.top;
+  const insideShell = shellX >= 0 && shellY >= 0 && shellX <= shellRect.width && shellY <= shellRect.height;
   gazeCursor.hidden = !insideShell;
   if (insideShell) {
     gazeCursor.style.left = `${shellX}px`;
     gazeCursor.style.top = `${shellY}px`;
   }
-  const nx = (state.eye.smoothX - canvasRect.left) / canvasRect.width;
-  const ny = (state.eye.smoothY - canvasRect.top) / canvasRect.height;
-  if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1) updateExplorePosition(nx, ny, "gaze");
-  else if (state.activeRegion) {
+  const nx = (point.x - canvasRect.left) / canvasRect.width;
+  const ny = (point.y - canvasRect.top) / canvasRect.height;
+  if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1) {
+    updateExplorePosition(nx, ny, "gaze");
+  } else {
     updateGazeRegion(null, performance.now());
-    publishOutput(true);
+    publishOutput();
   }
 }
 
-gazeStability.addEventListener("input", () => {
-  updateGazeStabilityLabel();
-  const { windowSize } = gazeFrictionBase();
-  if (state.eye.rawHistory.length > windowSize) state.eye.rawHistory.splice(0, state.eye.rawHistory.length - windowSize);
-});
-updateGazeStabilityLabel();
-
-async function startEyeTracking() {
-  if (state.eye.active || state.eye.starting) return;
-  if (!window.WebcamClient || !window.WebEyeTrackProxy) {
-    showToast("The local eye-tracking model could not be loaded");
-    return;
-  }
-  if (state.mode !== "pointer") setInteractionMode("pointer");
-  await ensurePerformanceOutput();
-  const sessionId = ++state.eye.sessionId;
-  state.eye.starting = true;
-  state.eye.active = true;
-  state.eye.ready = false;
-  state.eye.smoothX = null;
-  state.eye.smoothY = null;
-  state.eye.rawHistory = [];
-  resetEyeRegionStability();
-  state.pointer.source = "gaze";
-  eyeStatus.textContent = "Loading WebEyeTrack · allow camera access";
-  $("#signalLabel").textContent = "ACTIVE REGION · GAZE";
-  updateEyeButtons();
-  try {
-    const webcamClient = new window.WebcamClient("eyeVideo");
-    const tracker = createEyeTrackerWithoutGlobalClickLearning(webcamClient);
-    state.eye.webcamClient = webcamClient;
-    state.eye.tracker = tracker;
-    tracker.onGazeResults = (result) => {
-      if (sessionId !== state.eye.sessionId || !state.eye.active) return;
-      if (!state.eye.ready) {
-        state.eye.ready = true;
-        state.eye.starting = false;
-        clearTimeout(state.eye.startupTimer);
-        eyeStatus.textContent = state.eye.calibrated ? "WebEyeTrack · calibrated" : "WebEyeTrack ready · calibration recommended";
-        updateEyeButtons();
-        showToast("Eye tracking is ready");
-      }
-      gazeToArtwork(result);
-    };
-    statusText.textContent = "Allow camera access, then keep your face centred in the preview.";
-    window.setTimeout(() => {
-      if (sessionId === state.eye.sessionId && state.eye.starting) eyeStatus.textContent = "Starting camera and local model…";
-    }, 1200);
-    state.eye.startupTimer = window.setTimeout(() => {
-      if (sessionId !== state.eye.sessionId || state.eye.ready || !state.eye.active) return;
-      eyeStatus.textContent = "No camera feed · allow access or try Chrome / Safari";
-      statusText.textContent = "The eye model loaded, but no camera feed was found. Allow camera access or open this address in Chrome or Safari.";
-    }, 6500);
-  } catch (error) {
-    stopEyeTracking(false);
-    eyeStatus.textContent = "Camera unavailable";
-    showToast(error.message || "Could not start eye tracking");
-  }
-}
-
-function stopEyeTracking(showMessage = true) {
-  state.eye.sessionId++;
-  state.eye.webcamClient?.stopWebcam();
-  state.eye.tracker?.worker?.terminate?.();
-  state.eye.webcamClient = null;
-  state.eye.tracker = null;
-  state.eye.active = false;
-  state.eye.starting = false;
-  state.eye.ready = false;
-  state.eye.smoothX = null;
-  state.eye.smoothY = null;
-  state.eye.rawHistory = [];
-  resetEyeRegionStability();
-  state.pointer.source = "mouse";
-  gazeCursor.hidden = true;
-  calibrationOverlay.hidden = true;
-  clearTimeout(state.eye.calibrationTimer);
-  clearTimeout(state.eye.startupTimer);
-  eyeStatus.textContent = "Mouse active · camera off";
-  $("#signalLabel").textContent = "ACTIVE REGION · MOUSE";
-  updateEyeButtons();
-  clearActiveRegion();
-  publishOutput(true);
-  if (showMessage) statusText.textContent = "Mouse exploration is active.";
-}
+// ----- Calibration: 12 red dots over the artwork, 5 clicks each -----
 
 const CALIBRATION_COLS = 3;
 const CALIBRATION_ROWS = 4;
@@ -3143,148 +3160,231 @@ function buildCalibrationTargets() {
   const targets = [];
   for (let row = 0; row < CALIBRATION_ROWS; row++) {
     for (let column = 0; column < CALIBRATION_COLS; column++) {
-      const screenX = bounds.left + (bounds.right - bounds.left) * column / (CALIBRATION_COLS - 1);
-      const screenY = bounds.top + (bounds.bottom - bounds.top) * row / (CALIBRATION_ROWS - 1);
       targets.push({
-        screenX,
-        screenY,
-        targetX: screenX / window.innerWidth,
-        targetY: screenY / window.innerHeight,
+        screenX: bounds.left + (bounds.right - bounds.left) * column / (CALIBRATION_COLS - 1),
+        screenY: bounds.top + (bounds.bottom - bounds.top) * row / (CALIBRATION_ROWS - 1),
       });
     }
   }
   return targets;
 }
 
-function median(values) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+function clearCalibrationDots() {
+  document.querySelectorAll(".webgazer-dot").forEach((dot) => dot.remove());
 }
 
-function solveLinearSystem(matrix, vector) {
-  const size = vector.length;
-  const rows = matrix.map((row, index) => [...row, vector[index]]);
-  for (let column = 0; column < size; column++) {
-    let pivot = column;
-    for (let row = column + 1; row < size; row++) {
-      if (Math.abs(rows[row][column]) > Math.abs(rows[pivot][column])) pivot = row;
-    }
-    if (Math.abs(rows[pivot][column]) < 1e-8) return null;
-    [rows[column], rows[pivot]] = [rows[pivot], rows[column]];
-    const divisor = rows[column][column];
-    for (let cell = column; cell <= size; cell++) rows[column][cell] /= divisor;
-    for (let row = 0; row < size; row++) {
-      if (row === column) continue;
-      const factor = rows[row][column];
-      for (let cell = column; cell <= size; cell++) rows[row][cell] -= factor * rows[column][cell];
-    }
-  }
-  return rows.map((row) => row[size]);
+function updateCalibrationProgress(remaining) {
+  calibrationProgress.textContent = `${remaining} ${remaining === 1 ? "dot" : "dots"} left`;
 }
 
-function fitEyeCalibration(pairs) {
-  if (pairs.length < 6) return null;
-  const normal = Array.from({ length: 3 }, () => new Array(3).fill(0));
-  const targetX = new Array(3).fill(0);
-  const targetY = new Array(3).fill(0);
-  for (const pair of pairs) {
-    const features = [pair.rawX, pair.rawY, 1];
-    for (let row = 0; row < 3; row++) {
-      targetX[row] += features[row] * pair.targetX;
-      targetY[row] += features[row] * pair.targetY;
-      for (let column = 0; column < 3; column++) normal[row][column] += features[row] * features[column];
-    }
-  }
-  for (let index = 0; index < 3; index++) normal[index][index] += 1e-6;
-  const x = solveLinearSystem(normal, targetX);
-  const y = solveLinearSystem(normal, targetY);
-  if (!x || !y) return null;
-  const squaredError = pairs.reduce((sum, pair) => {
-    const predictedX = x[0] * pair.rawX + x[1] * pair.rawY + x[2];
-    const predictedY = y[0] * pair.rawX + y[1] * pair.rawY + y[2];
-    return sum + (predictedX - pair.targetX) ** 2 + (predictedY - pair.targetY) ** 2;
-  }, 0);
-  return { x, y, rmsError: Math.sqrt(squaredError / pairs.length), points: pairs.length };
-}
+function startCalibration() {
+  state.eye.calibrated = false;
+  state.eye.calibrating = true;
+  resetGazeSmoothing();
+  resetEyeRegionStability();
+  clearActiveRegion();
+  gazeCursor.hidden = true;
+  state.eye.calSum = { x: 0, y: 0, gap: 0, n: 0 };
+  state.eye.headRef = null;
+  state.eye.headLog = [];
+  clearCalibrationDots();
+  canvas.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "instant" });
 
-function applyEyeCalibration(rawX, rawY) {
-  const model = state.eye.calibrationModel;
-  if (!model) return { x: rawX, y: rawY };
-  return {
-    x: model.x[0] * rawX + model.x[1] * rawY + model.x[2],
-    y: model.y[0] * rawX + model.y[1] * rawY + model.y[2],
-  };
-}
-
-function recordCalibrationSample(rawX, rawY) {
-  if (calibrationOverlay.hidden || performance.now() < state.eye.calibrationCollectingAt) return;
-  if (rawX < -.35 || rawX > 1.35 || rawY < -.35 || rawY > 1.35) return;
-  state.eye.calibrationSamples.push([rawX, rawY]);
-  if (state.eye.calibrationSamples.length > 90) state.eye.calibrationSamples.shift();
-}
-
-function armCalibrationTarget() {
-  const count = state.eye.calibrationSamples.length;
-  if (count >= EYE_CALIBRATION_SAMPLE_MIN) {
-    state.eye.calibrationReady = true;
-    calibrationTarget.classList.add("ready");
-    calibrationTarget.querySelector("span").textContent = "CLICK";
-    return;
-  }
-  calibrationTarget.querySelector("span").textContent = "KEEP STILL";
-  state.eye.calibrationTimer = window.setTimeout(armCalibrationTarget, 300);
-}
-
-function showCalibrationPoint() {
-  const target = state.eye.calibrationTargets[state.eye.calibrationIndex];
-  calibrationTarget.style.left = `${target.screenX}px`;
-  calibrationTarget.style.top = `${target.screenY}px`;
-  calibrationProgress.textContent = `Point ${state.eye.calibrationIndex + 1} of ${state.eye.calibrationTargets.length}`;
-  calibrationTarget.classList.remove("ready");
-  calibrationTarget.querySelector("span").textContent = "HOLD";
-  state.eye.calibrationReady = false;
-  state.eye.calibrationSamples = [];
-  state.eye.calibrationCollectingAt = performance.now() + 280;
-  clearTimeout(state.eye.calibrationTimer);
-  state.eye.calibrationTimer = window.setTimeout(armCalibrationTarget, 1050);
-}
-
-function startCalibration(event) {
-  event?.stopPropagation();
-  if (!state.eye.ready || !state.eye.active) return;
-  state.eye.calibrationIndex = 0;
-  state.eye.calibrationPairs = [];
-  state.eye.calibrationTargets = buildCalibrationTargets();
-  state.eye.rawHistory = [];
-  state.eye.smoothX = null;
-  state.eye.smoothY = null;
+  const targets = buildCalibrationTargets();
+  let remaining = targets.length;
+  updateCalibrationProgress(remaining);
+  calibrationOverlay.classList.add("webgazer-calibration");
   calibrationOverlay.hidden = false;
-  showCalibrationPoint();
+  eyeStatus.textContent = "WebGazer · calibrating";
+  statusText.textContent = "Calibration: look at each red dot and click it five times. Keep your head still.";
+
+  for (const target of targets) {
+    const dot = document.createElement("button");
+    dot.type = "button";
+    dot.className = "webgazer-dot";
+    dot.setAttribute("aria-label", "Calibration target");
+    dot.style.left = `${target.screenX}px`;
+    dot.style.top = `${target.screenY}px`;
+    let clicks = 0;
+    dot.addEventListener("click", () => {
+      clicks++;
+      dot.style.opacity = String(Math.max(.15, 1 - clicks * .17));
+      if (clicks < CALIBRATION_CLICKS_PER_DOT) return;
+      dot.remove();
+      remaining--;
+      updateCalibrationProgress(remaining);
+      if (remaining === 0) finishCalibration();
+    });
+    document.body.appendChild(dot);
+  }
+  updateEyeButtons();
 }
 
 function finishCalibration() {
-  const model = fitEyeCalibration(state.eye.calibrationPairs);
-  if (!model || model.rmsError > .18) {
-    calibrationOverlay.hidden = true;
-    eyeStatus.textContent = state.eye.calibrated
-      ? "WebEyeTrack · previous calibration kept"
-      : "Calibration failed · try again";
-    showToast("Gaze samples were not stable enough · please recalibrate");
+  state.eye.calibrating = false;
+  state.eye.calibrated = true;
+  calibrationOverlay.hidden = true;
+  resetGazeSmoothing();
+  resetEyeRegionStability();
+  const sum = state.eye.calSum;
+  state.eye.headRef = sum.n >= 20 ? { x: sum.x / sum.n, y: sum.y / sum.n, gap: sum.gap / sum.n } : null;
+  state.eye.headLog = [];
+  let learned = null;
+  try {
+    learned = window.webgazer.getRegression()[0].screenXClicksArray.data.length;
+  } catch {
+    learned = null;
+  }
+  eyeStatus.textContent = "WebGazer · calibrated";
+  statusText.textContent = `Calibration finished${learned ? ` (${learned} samples learned)` : ""}. Look across the artwork. If the ring is off, look at a spot and click it to correct it. Keep your head where it was during calibration.`;
+  showToast("Eye calibration complete");
+  updateEyeButtons();
+}
+
+function recalibrate(event) {
+  event?.stopPropagation();
+  const gaze = window.webgazer;
+  if (!state.eye.webgazerStarted || !gaze) return;
+  try {
+    if (!state.eye.running) resumeWebGazer();
+    if (typeof gaze.clearData === "function") {
+      gaze.clearData();
+      // clearData() also resets the memory size, so enlarge it again.
+      tuneWebGazer();
+    }
+    startCalibration();
+  } catch (error) {
+    console.error("Recalibration failed:", error);
+    showToast(`Recalibration failed: ${error.message}`);
+  }
+}
+
+// ----- Start / pause / resume -----
+
+function resumeWebGazer() {
+  const gaze = window.webgazer;
+  setPreviewVisible(true);
+  const result = gaze.resume();
+  result?.catch?.((error) => console.warn("Resume warning:", error));
+  state.eye.running = true;
+}
+
+async function startEyeTracking() {
+  if (state.eye.active || state.eye.starting) return;
+  const gaze = window.webgazer;
+  if (!gaze) {
+    showToast("WebGazer could not be loaded");
+    eyeStatus.textContent = "WebGazer missing";
     return;
   }
-  state.eye.calibrationModel = model;
-  calibrationOverlay.hidden = true;
-  state.eye.calibrated = true;
-  state.eye.rawHistory = [];
-  state.eye.smoothX = null;
-  state.eye.smoothY = null;
+  state.eye.active = true;
+  state.pointer.source = "gaze";
+  $("#signalLabel").textContent = "ACTIVE REGION · GAZE";
+  clearActiveRegion();
+  resetGazeSmoothing();
   resetEyeRegionStability();
-  eyeStatus.textContent = "WebEyeTrack · calibrated";
-  statusText.textContent = "Eye tracking is calibrated. Look across the artwork to hear its regions.";
-  showToast("Eye calibration complete");
+
+  // Already started once: resume with the previous calibration.
+  if (state.eye.webgazerStarted) {
+    try {
+      resumeWebGazer();
+    } catch (error) {
+      console.error("Resume failed:", error);
+      showToast(`Could not resume eye tracking: ${error.message}`);
+      stopEyeTracking(false);
+      return;
+    }
+    updateEyeButtons();
+    if (state.eye.calibrated) {
+      eyeStatus.textContent = "WebGazer · calibrated";
+      statusText.textContent = "Eye tracking resumed with your previous calibration. Look at the artwork without moving your mouse.";
+    } else {
+      startCalibration();
+    }
+    return;
+  }
+
+  state.eye.starting = true;
+  updateEyeButtons();
+  eyeStatus.textContent = "Loading WebGazer · allow camera access";
+  statusText.textContent = "Allow camera access, then keep your face inside the green box in the preview.";
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Camera access is unavailable. Open http://127.0.0.1:8765 in Chrome or Safari.");
+    }
+    if (gaze.params) {
+      gaze.params.faceMeshSolutionPath = WEBGAZER_FACE_MESH_PATH;
+      gaze.params.videoViewerWidth = WEBGAZER_PREVIEW_W;
+      gaze.params.videoViewerHeight = WEBGAZER_PREVIEW_H;
+    }
+    gaze.setRegression?.("ridge");
+    tuneWebGazer();
+    gaze.setGazeListener(onGaze);
+    gaze.saveDataAcrossSessions?.(false);
+    setPreviewVisible(true);
+    gaze.showPredictionPoints?.(false);
+    await gaze.begin();
+    // begin() can set things up again, so apply the tuning once more.
+    tuneWebGazer();
+    gaze.applyKalmanFilter?.(true);
+    state.eye.webgazerStarted = true;
+    state.eye.running = true;
+    state.eye.starting = false;
+    if (!state.eye.active) {
+      // The person switched back to mouse while the camera was starting.
+      gaze.pause();
+      setPreviewVisible(false);
+      state.eye.running = false;
+      updateEyeButtons();
+      return;
+    }
+    showToast("Camera started · click each red dot five times");
+    startCalibration();
+  } catch (error) {
+    console.error("Eye-tracking initialization failed:", error);
+    state.eye.starting = false;
+    stopEyeTracking(false);
+    eyeStatus.textContent = "Camera unavailable";
+    showToast(error?.message || "Could not start eye tracking");
+  }
 }
+
+// Pauses WebGazer and goes back to the mouse. The calibration is kept, so
+// selecting Eye tracking again resumes without recalibrating.
+function stopEyeTracking(showMessage = true) {
+  clearCalibrationDots();
+  state.eye.calibrating = false;
+  calibrationOverlay.hidden = true;
+  const gaze = window.webgazer;
+  if (state.eye.webgazerStarted && gaze) {
+    try {
+      gaze.pause();
+      setPreviewVisible(false);
+    } catch (error) {
+      console.warn("Could not pause WebGazer:", error);
+    }
+  }
+  state.eye.running = false;
+  state.eye.active = false;
+  state.eye.starting = false;
+  resetGazeSmoothing();
+  resetEyeRegionStability();
+  state.pointer.source = "mouse";
+  gazeCursor.hidden = true;
+  setHeadStatus("");
+  eyeStatus.textContent = state.eye.calibrated ? "Mouse active · eye calibration kept" : "Mouse active · camera off";
+  $("#signalLabel").textContent = "ACTIVE REGION · MOUSE";
+  updateEyeButtons();
+  clearActiveRegion();
+  publishOutput(true);
+  if (showMessage) statusText.textContent = "Mouse exploration is active.";
+}
+
+gazeStability.addEventListener("input", updateGazeStabilityLabel);
+gazeRadius.addEventListener("input", updateGazeRadiusLabel);
+gazeCursor.classList.add("gaze-ring");
+updateGazeStabilityLabel();
+updateGazeRadiusLabel();
 
 mouseSource.addEventListener("click", (event) => { event.stopPropagation(); stopEyeTracking(); });
 eyeToggle.addEventListener("click", (event) => {
@@ -3292,29 +3392,21 @@ eyeToggle.addEventListener("click", (event) => {
   if (state.eye.active || state.eye.starting) stopEyeTracking();
   else startEyeTracking();
 });
-eyeVideo.addEventListener("playing", () => {
-  if (state.eye.active && !state.eye.ready) eyeStatus.textContent = "Camera live · local model initializing";
-});
-eyeCalibrate.addEventListener("click", startCalibration);
+eyeCalibrate.addEventListener("click", recalibrate);
 calibrationCancel.addEventListener("click", (event) => {
   event.stopPropagation();
-  calibrationOverlay.hidden = true;
-  clearTimeout(state.eye.calibrationTimer);
+  stopEyeTracking();
 });
-calibrationTarget.addEventListener("click", () => {
-  if (!state.eye.calibrationReady) return;
-  state.eye.calibrationReady = false;
-  const target = state.eye.calibrationTargets[state.eye.calibrationIndex];
-  state.eye.calibrationPairs.push({
-    rawX: median(state.eye.calibrationSamples.map((point) => point[0])),
-    rawY: median(state.eye.calibrationSamples.map((point) => point[1])),
-    targetX: target.targetX,
-    targetY: target.targetY,
-  });
-  state.eye.calibrationIndex++;
-  if (state.eye.calibrationIndex >= state.eye.calibrationTargets.length) finishCalibration();
-  else showCalibrationPoint();
+window.addEventListener("beforeunload", () => {
+  if (state.eye.webgazerStarted) window.webgazer?.end?.();
 });
+
+function median(values) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
 
 function setSetupVisible(visible) {
   setupScreen.hidden = !visible;
@@ -3621,9 +3713,7 @@ function syncFullscreenState() {
   pointerFullscreen.setAttribute("aria-pressed", String(active));
   scanFullscreen.setAttribute("aria-pressed", String(active));
   fullscreenExit.setAttribute("aria-hidden", String(!active));
-  state.eye.smoothX = null;
-  state.eye.smoothY = null;
-  state.eye.rawHistory = [];
+  resetGazeSmoothing();
   resetEyeRegionStability();
   drawCanvas();
 }

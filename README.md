@@ -13,7 +13,7 @@ Street Art Sonification is a local, interactive artwork explorer. It divides a s
 - Analyse the image into a maximum of nine playable regions.
 - Choose between two separate interaction modes: **Pointer / Gaze** and **Left-to-Right Scan**.
 - Hear different responses inside different regions with a mouse or webcam-based gaze tracking.
-- Calibrate the local eye tracker with nine on-screen points and follow its visible gaze cursor.
+- Calibrate the local WebGazer eye tracker with twelve red dots (five clicks each) and follow its visible gaze ring.
 - Hear a click at boundaries and see the active contour.
 - Set the left-to-right scan to any duration from 5 seconds to 10 minutes.
 - Drag the scan timeline to hear any horizontal position immediately.
@@ -109,12 +109,14 @@ Browsers require a click before they allow a webpage to play sound. If the page 
 2. Choose **Mouse / Eye Tracking**, then select **Eye tracking**.
 3. Allow access to the webcam when the browser asks.
 4. Keep your face centred in the small camera preview.
-5. When **Calibrate** becomes available, select it.
-6. Look at each target, hold still, then click the target. Repeat for all twelve points arranged over the artwork.
-7. Adjust **Gaze stability** if needed: **Responsive** follows faster, while **Stable** reduces visible jitter.
-8. Look across the artwork. The visible gaze cursor activates the same regions and sounds as the mouse.
+5. Calibration starts automatically: twelve red dots appear over the artwork. Look at each dot and click it five times. Keep your head still.
+6. Adjust **Friction** if needed: left is quick but shaky, right is steady but slow.
+7. Adjust **Radius** to change how big an area around your gaze is averaged for the colour and region.
+8. Look across the artwork. The gaze ring activates the same regions and sounds as the mouse. If the ring is off, look at a spot and click it to correct it.
+9. Watch the head-position message at the top of the artwork. If it says your head moved, move back or select **Recalibrate**.
+10. Select **Mouse** to pause eye tracking. Selecting **Eye tracking** again resumes with the same calibration.
 
-WebEyeTrack, MediaPipe, and the camera feed run locally in the browser. Camera frames are not sent to the Python server or an external service. The adjustable stability control combines a 3–15 frame median window, distance-aware easing, and a dead zone that automatically becomes smaller over small semantic regions. Gaze selection also votes across a small circular neighbourhood instead of trusting a single pixel, which reduces flicker at region boundaries. The local median colour around the mouse or gaze point shapes the shared Web Audio / MIDI event. Ordinary webcams are less precise than dedicated infrared eye trackers, so stable lighting and a steady head position improve the result.
+WebGazer, MediaPipe Face Mesh, and the camera feed run locally in the browser. Camera frames are not sent to the Python server or an external service. The eye tracker is ported from the [Colour Eye Tracking](https://github.com/aumritam/color_eye_tracking) prototype: ridge regression with a Kalman filter, a 120-click memory so all 60 calibration clicks are kept, learning from clicks only (not mouse movement), a head-movement watcher, and a Friction control that combines a 3–15 frame median window, distance-aware easing, and a 0–80 px dead zone. Gaze selection votes across a circular neighbourhood set by **Radius** instead of trusting a single pixel, which reduces flicker at region boundaries. The local median colour around the mouse or gaze point shapes the shared Web Audio / MIDI event. Ordinary webcams are less precise than dedicated infrared eye trackers, so stable lighting and a steady head position improve the result.
 
 ### Play a left-to-right scan
 
@@ -162,7 +164,7 @@ Artwork image ──→ Street-art region plan ──→ SAM 3 + SAM 2.1 masks
                                       ↓
                             Shared event engine
                                       ↓
-                    Mouse / WebEyeTrack / timed scan
+                    Mouse / WebGazer / timed scan
                                       ↓
                          Shared musical event stream
                                ↙              ↘
@@ -177,7 +179,7 @@ Artwork image ──→ Street-art region plan ──→ SAM 3 + SAM 2.1 masks
 - **SAM 3 (MLX 6-bit)** looks for multiple instances of a named visual concept within the mural. Matching windows or repeated painted motifs can share one playable region. Small colour-matched painted blocks can also form their own region when the initial plan names only a broad colour background.
 - **SAM 2.1 Hiera Tiny** handles artwork cropping and proposals without a reliable SAM 3 match. The existing crack detector remains active and uses corroborating SAM 3 tile masks near its detected lines. The final non-overlapping masks drive pointer, gaze, contours, and the timed scan. When SAM 3 is unavailable, the SAM 2.1 workflow still runs.
 - The **algorithmic music engine** assigns each region one of nine musical roles, quantises every note to the shared key and tempo, and generates melody, chords, bass, drums, and texture in real time.
-- **WebEyeTrack** uses a lightweight BlazeGaze CNN, MediaPipe face landmarks, head-pose compensation, and local calibration to estimate a screen gaze point.
+- **WebGazer.js** uses MediaPipe Face Mesh eye patches, ridge regression, a Kalman filter, and click-based calibration to estimate a screen gaze point.
 - **Web Audio** uses a hybrid four-operator FM/phase-modulation engine implemented in an AudioWorklet. FM is combined with anti-aliased saw and pulse layers, five-voice unison, pitch envelopes, comb-resonator plucks, formant filtering, wavefolding, clipping, bit reduction, transient/noise layers, and two-LFO movement. Lead and Pad favour wide synthetic stacks; Guitar and Keys favour resonant plucks; Counter Synth favours glass/formant colour; Bass and Drums use compact pitch envelopes and clipping; Percussion / Texture uses inharmonic FM and controlled digital fracture. A 9-emotion × 9-instrument response matrix gives every instrument a dedicated version of every GEMS dimension across 29 continuously blended synthesis parameters. Tempo-synchronised delay and ducked reverb preserve rhythmic clarity while allowing spatial tails to bloom between gestures. Web Audio renders exactly the same note, chord, rhythm, velocity, duration, crossfade, and controller events used by MIDI Out; only the final instrument renderer changes.
 - **Mido + python-rtmidi** send MIDI notes and controller values through CoreMIDI.
 - **python-osc** sends OSC messages to a local or network receiver.
@@ -334,7 +336,7 @@ More technical notes are available in [`WEB_DEMO.md`](WEB_DEMO.md) and [`INTERAC
 - Qwen3-VL 2B Instruct, Apache 2.0.
 - SAM 2.1 Hiera Tiny by Meta, Apache 2.0.
 - SAM 3 by Meta, [SAM License](https://github.com/facebookresearch/sam3/blob/main/LICENSE), via the [MLX Community 6-bit conversion](https://huggingface.co/mlx-community/sam3-6bit).
-- WebEyeTrack by RedForestAI, MIT License.
+- WebGazer.js by the Brown WebGazer Team, GPL v3.
 - MediaPipe Tasks Vision by Google, Apache 2.0.
 - MLX-VLM, MIT License.
 - Legacy sample files remain in the repository for backwards compatibility, but the current Web Audio engine does not load them. Their original credits are preserved in [`webapp/static/samples/LICENSES.md`](webapp/static/samples/LICENSES.md).
@@ -343,9 +345,9 @@ More technical notes are available in [`WEB_DEMO.md`](WEB_DEMO.md) and [`INTERAC
 
 - [SIREN — Sonification Interface for REmapping Nature](https://github.com/Kizjkre/siren) informed the longer-term direction for editable mappings, session saving, and rendered audio export.
 - [Hue Scanner](https://github.com/aumritam/image_color_slider) informed the use of local colour statistics in scan and pointer interaction.
-- [Colour Eye Tracking](https://github.com/aumritam/color_eye_tracking) informed artwork-relative calibration, circular gaze sampling, and the adjustable friction concept.
+- [Colour Eye Tracking](https://github.com/aumritam/color_eye_tracking) is the source of the current WebGazer eye tracker: calibration, friction, radius, and the head-movement watcher were ported from it.
 
-These repositories are acknowledged as design references. Their source code was not copied into this project because no explicit licence file was visible when reviewed; the related interaction ideas were implemented independently in the existing architecture.
+SIREN and Hue Scanner are acknowledged as design references; their ideas were implemented independently in the existing architecture. The eye tracker is ported directly from Colour Eye Tracking by its author.
 
 The small browser eye-tracking assets are included for reliable local use. The installer downloads the larger Qwen3-VL and SAM model weights separately.
 
