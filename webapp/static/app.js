@@ -2805,11 +2805,20 @@ scanDuration.addEventListener("keydown", (event) => {
     scanDuration.blur();
   }
 });
+// For now, Mouse / Eye Tracking opens the Colour Eye Tracking app (eye
+// tracker, colour naming, Omnichord music and Scanner) in a new tab with the
+// current artwork. The original pointer/gaze mode code is kept below so the
+// two can be combined later.
+function openColorEyeApp() {
+  const imageUrl = state.manifest?.image_url || "";
+  const query = imageUrl ? `?image=${encodeURIComponent(imageUrl)}` : "";
+  const opened = window.open(`/static/color-eye/index.html${query}`, "_blank");
+  if (!opened) showToast("Allow pop-ups for this page to open the eye tracker");
+}
+
 pointerMode.addEventListener("click", (event) => {
   event.stopPropagation();
-  setInteractionMode("pointer");
-  setSetupVisible(false);
-  showToast("Mouse / Eye Tracking mode ready");
+  openColorEyeApp();
 });
 scanMode.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -2819,6 +2828,10 @@ scanMode.addEventListener("click", (event) => {
 });
 interactionModeSwitch.addEventListener("click", () => {
   const nextMode = state.mode === "pointer" ? "scan" : "pointer";
+  if (nextMode === "pointer") {
+    openColorEyeApp();
+    return;
+  }
   setInteractionMode(nextMode);
   showToast(nextMode === "pointer" ? "Mouse / Eye Tracking mode ready" : "Left-to-Right mode ready");
 });
