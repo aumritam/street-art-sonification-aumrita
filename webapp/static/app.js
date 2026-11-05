@@ -2807,11 +2807,16 @@ scanDuration.addEventListener("keydown", (event) => {
 });
 // For now, Mouse / Eye Tracking opens the Colour Eye Tracking app (eye
 // tracker, colour naming, Omnichord music and Scanner) in a new tab with the
-// current artwork. The original pointer/gaze mode code is kept below so the
+// current artwork and its key. The original pointer/gaze mode code is kept below so the
 // two can be combined later.
 function openColorEyeApp() {
-  const imageUrl = state.manifest?.image_url || "";
-  const query = imageUrl ? `?image=${encodeURIComponent(imageUrl)}` : "";
+  // Pass the artwork and the key the AI picked (root + mode), so the
+  // Omnichord and scanner play in the same key as the rest of the system.
+  const params = new URLSearchParams();
+  if (state.manifest?.image_url) params.set("image", state.manifest.image_url);
+  if (state.music?.root) params.set("root", state.music.root);
+  if (state.music?.mode) params.set("mode", state.music.mode);
+  const query = params.toString() ? `?${params}` : "";
   const opened = window.open(`/static/color-eye/index.html${query}`, "_blank");
   if (!opened) showToast("Allow pop-ups for this page to open the eye tracker");
 }
